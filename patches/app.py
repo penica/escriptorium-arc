@@ -43,3 +43,27 @@ for name in ('train', 'segtrain', 'train_from_collection', 'segtrain_from_collec
 import re
 s=re.sub(r'(?m)^( +)convert_models\(\[best_path\], model.file.path\)', r'\1assert_training_lock()\n\1convert_models([best_path], model.file.path)', s)
 p.write_text(s)
+
+# Durable per-document controls apply to standard and portable document training.
+# Collection recipes keep their existing behavior until separately migrated.
+import ast
+s=p.read_text()
+s='from training_policy import managed_training, current_policy, dispatch_videm\n'+s
+for name in ('train','segtrain'):
+    marker='@exclusive_training\ndef '+name+'('
+    assert s.count(marker)==1
+    s=s.replace(marker,'@exclusive_training\n@managed_training\ndef '+name+'(')
+marker='def segtrain(model_pk=None, part_pks=[], document_pk=None, task_group_pk=None, user_pk=None, **kwargs):\n'
+s=s.replace(marker,marker+"    handled, result = dispatch_videm(model_pk=model_pk, part_pks=part_pks, document_pk=document_pk, task_group_pk=task_group_pk, user_pk=user_pk, **kwargs)\n    if handled:\n        return result\n")
+# Upstream catches errors for notifications; managed jobs must also report failure.
+lines=s.splitlines(True)
+for node in reversed(ast.parse(s).body):
+    if isinstance(node,ast.FunctionDef) and node.name in ('train','segtrain'):
+        chunk=''.join(lines[node.lineno-1:node.end_lineno])
+        chunk=chunk.replace('        logger.exception(e)\n','        logger.exception(e)\n        if current_policy() is not None:\n            raise\n')
+        chunk=chunk.replace('        except FileNotFoundError:\n','        except FileNotFoundError:\n            if current_policy() is not None:\n                raise\n')
+        chunk=chunk.replace('    except DidNotConverge:\n','    except DidNotConverge:\n        if current_policy() is not None:\n            raise\n')
+        lines[node.lineno-1:node.end_lineno]=[chunk]
+s=''.join(lines)
+s+='\nfrom standard_training import PolicyTrainer\nKrakenTrainer = PolicyTrainer\n'
+p.write_text(s)

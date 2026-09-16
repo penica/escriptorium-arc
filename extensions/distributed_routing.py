@@ -14,7 +14,11 @@ class DeviceRouter:
         if name in INFERENCE:
             return {'queue': self.inference_queue}
         if name in TRAINING:
-            document = (kwargs or {}).get('document_pk')
+            from training_policy import document_policy, task_document
+            document = task_document(name, args, kwargs)
+            policy = document_policy(document) if document is not None else None
+            if policy is not None:
+                return {'queue': self.training_queue if policy['device'] == 'cuda' else 'gpu'}
             if document is not None and int(document) in self.training_documents:
                 return {'queue': self.training_queue}
             return {'queue': 'gpu'}

@@ -10,3 +10,5 @@
 !licenses/**
 !scripts/
 !scripts/smoke-image.py
+!scripts/check-routing.py
+!scripts/check-training-policy.py

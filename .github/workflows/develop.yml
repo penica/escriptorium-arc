@@ -84,7 +84,9 @@ jobs:
         id: upstream
         run: python3 scripts/fetch-upstream.py
       - name: Validate application patches
-        run: python3 scripts/check-source.py
+        run: |
+          python3 scripts/check-source.py
+          python3 scripts/check-training-policy.py
       - name: Calculate immutable candidate tag
         id: image
         env:

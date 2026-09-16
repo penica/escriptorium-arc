@@ -23,6 +23,8 @@ RUN python /opt/arc-build/app.py && python -m compileall -q /usr/src/app/apps /u
 ENV VERSION_DATE=develop-${UPSTREAM_COMMIT} FRONTEND_DIR=/usr/src/app/front TORCH_COMPILE_DISABLE=1
 COPY scripts/smoke-image.py /opt/arc-build/smoke-image.py
 COPY scripts/check-routing.py /opt/arc-build/check-routing.py
+COPY scripts/check-training-policy.py /opt/arc-build/check-training-policy.py
 RUN PYTHONPATH=/usr/src/app:/usr/src/app/apps python /opt/arc-build/check-routing.py --celery
+RUN PYTHONPATH=/usr/src/app:/usr/src/app/apps python /opt/arc-build/check-training-policy.py
 RUN PYTHONPATH=/usr/src/app:/usr/src/app/apps python /opt/arc-build/smoke-image.py
 LABEL org.opencontainers.image.revision="${UPSTREAM_COMMIT}" org.opencontainers.image.source="https://github.com/penica/escriptorium-arc" org.opencontainers.image.upstream="https://gitlab.com/scripta/escriptorium.git"
