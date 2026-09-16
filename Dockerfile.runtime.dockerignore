@@ -1,0 +1,7 @@
+*
+!Dockerfile.runtime
+!runtime/
+!runtime/**
+!.build/
+!.build/intel-runtime/
+!.build/intel-runtime/**

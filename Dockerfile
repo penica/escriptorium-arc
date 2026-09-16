@@ -21,4 +21,6 @@ COPY licenses/ /opt/arc-build/licenses/
 RUN cd /usr/local/lib/python3.12/site-packages/kraken/lib && patch --batch --forward --fuzz=0 -p1 < /opt/arc-build/kraken-segmentation.patch
 RUN python /opt/arc-build/app.py && python -m compileall -q /usr/src/app/apps /usr/src/app/escriptorium /usr/src/app/videm_training.py && python manage.py compilemessages && python -m pip freeze > /opt/arc-build/installed.lock.txt
 ENV VERSION_DATE=develop-${UPSTREAM_COMMIT} FRONTEND_DIR=/usr/src/app/front TORCH_COMPILE_DISABLE=1
-LABEL org.opencontainers.image.revision="${UPSTREAM_COMMIT}" org.opencontainers.image.source="https://gitlab.com/scripta/escriptorium.git"
+COPY scripts/smoke-image.py /opt/arc-build/smoke-image.py
+RUN PYTHONPATH=/usr/src/app:/usr/src/app/apps python /opt/arc-build/smoke-image.py
+LABEL org.opencontainers.image.revision="${UPSTREAM_COMMIT}" org.opencontainers.image.source="https://github.com/penica/escriptorium-arc" org.opencontainers.image.upstream="https://gitlab.com/scripta/escriptorium.git"

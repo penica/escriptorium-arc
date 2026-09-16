@@ -8,15 +8,15 @@ This is an independent compatibility build, not an official eScriptorium or Inte
 
 The recipe was extracted from a working local deployment based on upstream commit `5f17889fe571d8fa25feb5deebec4221d9485d32`. That deployment passed ARC inference and a short training/checkpoint test. Those results do not automatically validate future upstream commits or the newly parameterized public recipe.
 
-The GitHub workflow checks upstream and exact application patch applicability hourly and on manual dispatch/main updates. Image publication is gated until the repository variable **ARC_RUNTIME_IMAGE** points to an audited, accessible runtime image pinned by `@sha256:...`.
+The GitHub workflow builds the portable ARC runtime from the pinned public vendor image and checksum-verified Intel packages, then builds a candidate from the latest official `develop` commit. Runtime images are reused by a hash of their recipe and dependencies; candidates reference the exact registry digest. All jobs run on GitHub-hosted runners using the short-lived workflow token.
 
-**The runtime is not yet published. Therefore the initial workflow checks source compatibility but does not build or publish a container.** The existing local runtime must be rebuilt or audited for public distribution first, including its inherited layers, Intel library redistribution notices, and dependency provenance. Never publish a deployment container or a committed running container as the runtime.
+The first complete registry build is being validated. A published candidate is not a production release: real Intel ARC inference/training and isolated application checks remain a promotion gate.
 
 ## Pipeline
 
 1. Fetch the official `develop` HEAD and resolve it to an immutable SHA.
 2. Apply compatibility patches in a temporary copy. Stop if upstream code no longer matches.
-3. When the runtime is configured, skip already published upstream/recipe/runtime combinations.
+3. Build or reuse the portable runtime, then skip already published upstream/recipe/runtime combinations.
 4. Build with GitHub-hosted runners, run CPU import checks, and push a versioned candidate to GHCR using the workflow's short-lived GitHub token.
 5. Validate candidates separately on isolated staging storage and real Intel hardware while the GPU is idle.
 6. Promote a tested image only after a fresh production backup and an active-job check.
@@ -27,15 +27,17 @@ No production deployment, ARC test runner, or production credentials are configu
 
 ## Local build
 
-Use a clean checkout and Python 3.12 or newer:
+Use a clean Linux checkout, Docker, `dpkg-deb`, and Python 3.12 or newer:
 
 ```sh
+python3 scripts/prepare-intel-runtime.py
+docker build -f Dockerfile.runtime -t escriptorium-arc-runtime:local .
 python3 scripts/fetch-upstream.py --commit 5f17889fe571d8fa25feb5deebec4221d9485d32
 python3 scripts/check-source.py
-docker build --build-arg ARC_RUNTIME_IMAGE=YOUR_AUDITED_RUNTIME_AT_SHA256 --build-arg UPSTREAM_COMMIT=5f17889fe571d8fa25feb5deebec4221d9485d32 -t escriptorium-arc:candidate .
+docker build --build-arg ARC_RUNTIME_IMAGE=escriptorium-arc-runtime:local --build-arg UPSTREAM_COMMIT=5f17889fe571d8fa25feb5deebec4221d9485d32 -t escriptorium-arc:candidate .
 ```
 
-The runtime must provide the eScriptorium Python/runtime system dependencies, Kraken 7.1.1, Lightning 2.6.1, PyTorch 2.14.0+xpu, torchvision 0.29.0+xpu, dfine-kraken 0.4.3, and compatible Intel user-space libraries. It must contain unmodified Kraken segmentation source for the exact patch to apply. Application dependencies are constrained against the runtime; new upstream dependency requirements require review and an updated runtime.
+The included `Dockerfile.runtime` supplies the eScriptorium Python/runtime system dependencies, Kraken 7.1.1, Lightning 2.6.1, PyTorch 2.14.0+xpu, torchvision 0.29.0+xpu, dfine-kraken 0.4.3, and compatible Intel user-space libraries. It must contain unmodified Kraken segmentation source for the exact patch to apply. Application dependencies are constrained against the runtime; new upstream dependency requirements require review and an updated runtime.
 
 Runtime registration must work without an attached GPU; GPU execution requires the host's compatible driver/device mapping. The validated WSL worker uses `/dev/dxg` and `/usr/lib/wsl`, single-worker execution, float32 and eager mode. Native Linux device setup is separate and is not validated by the WSL checks.
 
@@ -50,3 +52,9 @@ Keep PostgreSQL, media and Redis in persistent volumes. Enable Redis AOF and sna
 ## Attribution
 
 Upstream eScriptorium and Kraken retain their respective licenses; see `licenses/`. The Videm training extension adapts eScriptorium training code. Third-party runtime components and model files retain their own licenses. Public source availability does not grant rights to redistribute private training material or third-party binary assets.
+
+## Runtime provenance
+
+`runtime/intel-packages.json` records exact package URLs, versions and SHA-256 checksums from the [Intel-documented Ubuntu PPA](https://dgpu-docs.intel.com/installation-guides/installing-packages-from-the-intel-ppa.html). Downloads are verified before extraction. Original package copyright/license notices and changelogs are included in `/opt/intel-runtime/licenses/`; package provenance is in `/opt/intel-runtime/package-provenance.json`.
+
+The public eScriptorium base is pinned by digest. Python constraints are recorded in `runtime/python-constraints.txt`, and the actual installed inventory is retained in `/opt/arc-runtime/installed.lock.txt`. OS package installation and wheel availability still depend on upstream repositories; this is not a promise of byte-for-byte reproducibility. No local container filesystem, models, credentials, or private configuration are copied into the runtime. GitHub Packages visibility is separate from repository visibility; package settings must allow public pulls for unauthenticated users.

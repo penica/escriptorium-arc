@@ -8,3 +8,5 @@
 !patches/**
 !licenses/
 !licenses/**
+!scripts/
+!scripts/smoke-image.py

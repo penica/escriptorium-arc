@@ -15,14 +15,67 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.digest.outputs.image }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Resolve runtime recipe
+        id: runtime
+        env:
+          RECIPE: ${{ hashFiles('Dockerfile.runtime', 'Dockerfile.runtime.dockerignore', 'runtime/**', 'scripts/prepare-intel-runtime.py') }}
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          image="ghcr.io/$owner/escriptorium-arc-runtime:recipe-$RECIPE"
+          echo "tag=$image" >> "$GITHUB_OUTPUT"
+          if docker manifest inspect "$image" >/dev/null 2>&1; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Fetch and verify Intel libraries and notices
+        if: steps.runtime.outputs.exists != 'true'
+        run: python3 scripts/prepare-intel-runtime.py
+      - name: Build, validate and publish runtime
+        if: steps.runtime.outputs.exists != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile.runtime
+          push: true
+          tags: ${{ steps.runtime.outputs.tag }}
+          provenance: mode=max
+      - name: Pin runtime by registry digest
+        id: digest
+        env:
+          IMAGE: ${{ steps.runtime.outputs.tag }}
+        run: |
+          digest="$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${IMAGE%:*}@$digest"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "Runtime: $image" >> "$GITHUB_STEP_SUMMARY"
+
   candidate:
+    needs: runtime
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
       contents: read
       packages: write
     env:
-      ARC_RUNTIME_IMAGE: ${{ vars.ARC_RUNTIME_IMAGE }}
+      ARC_RUNTIME_IMAGE: ${{ needs.runtime.outputs.image }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Fetch immutable upstream source
@@ -30,13 +83,7 @@ jobs:
         run: python3 scripts/fetch-upstream.py
       - name: Validate application patches
         run: python3 scripts/check-source.py
-      - name: Explain runtime prerequisite
-        if: env.ARC_RUNTIME_IMAGE == ''
-        run: |
-          echo '### Source compatibility checked; image build not configured' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Publish an audited ARC runtime and set ARC_RUNTIME_IMAGE to its registry reference with @sha256 digest. No candidate image was built.' >> "$GITHUB_STEP_SUMMARY"
-      - name: Validate runtime and calculate immutable tag
-        if: env.ARC_RUNTIME_IMAGE != ''
+      - name: Calculate immutable candidate tag
         id: image
         env:
           UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
@@ -45,49 +92,42 @@ jobs:
           import hashlib, os, re
           runtime = os.environ['ARC_RUNTIME_IMAGE']
           if not re.fullmatch(r'[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64}', runtime):
-              raise SystemExit('ARC_RUNTIME_IMAGE must be a registry image pinned by digest')
+              raise SystemExit('Runtime reference must be pinned by digest')
           owner = os.environ['GITHUB_REPOSITORY_OWNER'].lower()
           tag = f"ghcr.io/{owner}/escriptorium-arc:develop-{os.environ['UPSTREAM_COMMIT']}-recipe-{os.environ['GITHUB_SHA'][:12]}-runtime-{hashlib.sha256(runtime.encode()).hexdigest()[:12]}"
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f'tag={tag}\n')
           PY
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        if: env.ARC_RUNTIME_IMAGE != ''
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Skip an already published candidate
-        if: env.ARC_RUNTIME_IMAGE != ''
         id: existing
         env:
           IMAGE: ${{ steps.image.outputs.tag }}
         run: |
           if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
             echo 'exists=true' >> "$GITHUB_OUTPUT"
-            echo "Candidate already exists: $IMAGE" >> "$GITHUB_STEP_SUMMARY"
           else
             echo 'exists=false' >> "$GITHUB_OUTPUT"
           fi
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-        if: env.ARC_RUNTIME_IMAGE != '' && steps.existing.outputs.exists != 'true'
-      - name: Build candidate locally
-        if: env.ARC_RUNTIME_IMAGE != '' && steps.existing.outputs.exists != 'true'
+      - name: Build, smoke-test and publish candidate
+        if: steps.existing.outputs.exists != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          load: true
-          push: false
+          push: true
           tags: ${{ steps.image.outputs.tag }}
+          provenance: mode=max
           build-args: |
             ARC_RUNTIME_IMAGE=${{ env.ARC_RUNTIME_IMAGE }}
             UPSTREAM_COMMIT=${{ steps.upstream.outputs.commit }}
-      - name: Import smoke test then publish candidate
-        if: env.ARC_RUNTIME_IMAGE != '' && steps.existing.outputs.exists != 'true'
+      - name: Record candidate digest and promotion requirements
         env:
           IMAGE: ${{ steps.image.outputs.tag }}
         run: |
-          docker run --rm --network none -e PYTHONPATH=/usr/src/app:/usr/src/app/apps -v "$PWD/scripts/smoke-image.py:/tmp/smoke.py:ro" --entrypoint python "$IMAGE" /tmp/smoke.py
-          docker push "$IMAGE"
-          echo "### Candidate published: $IMAGE" >> "$GITHUB_STEP_SUMMARY"
-          echo 'Requires isolated database migration, editor, recognition, segmentation and real ARC training tests before production promotion.' >> "$GITHUB_STEP_SUMMARY"
+          docker buildx imagetools inspect "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          echo 'CPU import checks are built into the Dockerfile and must pass before publication. Candidate requires isolated migrations, editor checks and real ARC inference/training before production promotion.' >> "$GITHUB_STEP_SUMMARY"

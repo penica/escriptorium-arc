@@ -1,0 +1,10 @@
+FROM registry.gitlab.com/scripta/escriptorium@sha256:997e6f4e668ec65a3a0ae108f8ff1aa56e01c0eee16369b2fe8204d9a908ee68
+USER root
+COPY runtime/python-constraints.txt /opt/arc-runtime/python-constraints.txt
+RUN python -m pip install --no-cache-dir -c /opt/arc-runtime/python-constraints.txt torch==2.14.0+xpu torchvision==0.29.0+xpu --index-url https://download.pytorch.org/whl/xpu
+RUN python -m pip install --no-cache-dir -c /opt/arc-runtime/python-constraints.txt kraken==7.1.1 lightning==2.6.1 dfine-kraken==0.4.3 && python -m pip check
+COPY .build/intel-runtime/ /opt/intel-runtime/
+RUN ldconfig -n /opt/intel-runtime
+ENV LD_LIBRARY_PATH=/opt/intel-runtime:/usr/lib/wsl/lib OCL_ICD_VENDORS=/opt/intel-runtime/vendors TORCH_COMPILE_DISABLE=1
+RUN python -c "import torch; from importlib.metadata import version; assert version('kraken') == '7.1.1'; assert version('lightning') == '2.6.1'; assert torch.version.xpu is not None; print('Pinned runtime imports passed')" && python -m pip freeze > /opt/arc-runtime/installed.lock.txt
+LABEL org.opencontainers.image.title="eScriptorium Intel ARC runtime" org.opencontainers.image.source="https://github.com/penica/escriptorium-arc" org.opencontainers.image.description="Rebuilt from public vendor sources with pinned Intel packages and redistribution notices; no deployment data"
