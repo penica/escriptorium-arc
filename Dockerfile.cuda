@@ -1,0 +1,8 @@
+# Preserve the validated application and patches; replace only the GPU runtime.
+ARG BASE_IMAGE=ghcr.io/penica/escriptorium-arc@sha256:de8c3374e56e76bfc4c9f98267ff62fb1b2fc0335dceb48fe4f5157a017092ef
+FROM ${BASE_IMAGE}
+USER root
+ENV KRAKEN_ENABLE_XPU=0 KRAKEN_TRAINING_DEVICE=cuda:0 KRAKEN_INFERENCE_DEVICE=cuda:0 LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+RUN python -m pip freeze | grep -viE '^(torch==|torchvision==|triton[-=]|intel-|oneccl|nvidia-|cuda-)' > /tmp/cuda-constraints.txt && python -m pip uninstall -y torch torchvision triton triton-xpu && python -m pip install --no-cache-dir -c /tmp/cuda-constraints.txt torch==2.14.0+cu130 torchvision==0.29.0+cu130 --index-url https://download.pytorch.org/whl/cu130 && python -m pip check
+RUN python -c "import torch, torchvision; from importlib.metadata import version; assert torch.version.cuda == '13.0'; assert version('kraken') == '7.1.1'; assert version('lightning') == '2.6.1'; print(torch.__version__)" && python -m pip freeze > /opt/arc-build/cuda-installed.lock.txt
+LABEL org.opencontainers.image.description="eScriptorium CUDA worker candidate; GPU validation required"

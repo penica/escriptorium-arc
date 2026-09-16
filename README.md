@@ -10,7 +10,7 @@ The recipe was extracted from a working local deployment based on upstream commi
 
 The GitHub workflow builds the portable ARC runtime from the pinned public vendor image and checksum-verified Intel packages, then builds a candidate from the latest official `develop` commit. Runtime images are reused by a hash of their recipe and dependencies; candidates reference the exact registry digest. All jobs run on GitHub-hosted runners using the short-lived workflow token.
 
-The first complete registry build is being validated. A published candidate is not a production release: real Intel ARC inference/training and isolated application checks remain a promotion gate.
+The first complete ARC registry build passed isolated inference and short training/checkpoint checks on Intel ARC. A published candidate is not a production release: real Intel ARC inference/training and isolated application checks remain a promotion gate.
 
 ## Pipeline
 
@@ -58,3 +58,20 @@ Upstream eScriptorium and Kraken retain their respective licenses; see `licenses
 `runtime/intel-packages.json` records exact package URLs, versions and SHA-256 checksums from the [Intel-documented Ubuntu PPA](https://dgpu-docs.intel.com/installation-guides/installing-packages-from-the-intel-ppa.html). Downloads are verified before extraction. Original package copyright/license notices and changelogs are included in `/opt/intel-runtime/licenses/`; package provenance is in `/opt/intel-runtime/package-provenance.json`.
 
 The public eScriptorium base is pinned by digest. Python constraints are recorded in `runtime/python-constraints.txt`, and the actual installed inventory is retained in `/opt/arc-runtime/installed.lock.txt`. OS package installation and wheel availability still depend on upstream repositories; this is not a promise of byte-for-byte reproducibility. No local container filesystem, models, credentials, or private configuration are copied into the runtime. GitHub Packages visibility is separate from repository visibility; package settings must allow public pulls for unauthenticated users.
+## CUDA workers and distributed execution
+
+`Dockerfile.cuda` derives a CUDA worker candidate from an immutable application image. It replaces the XPU PyTorch wheels with torch 2.14.0+cu130 and torchvision 0.29.0+cu130, checks dependencies and records `/opt/arc-build/cuda-installed.lock.txt`. The initial derivative retains inherited Intel files in lower image layers; allow sufficient disk space when building and pulling it.
+
+The workflow publishes CUDA candidates to `ghcr.io/<owner>/escriptorium-cuda`, pinned to the matching application digest. CI checks imports; GPU and distributed tests are separate promotion gates. Nothing in the workflow deploys a candidate.
+
+For CUDA workers, set `KRAKEN_ENABLE_XPU=0`, `KRAKEN_TRAINING_DEVICE=cuda:0`, and `KRAKEN_INFERENCE_DEVICE=cuda:0`. Expose exactly one physical GPU per container. CUDA workers use full float32 matmul/convolution precision: enabling TF32 can change thresholded segmentation contours.
+
+Distributed execution uses the same PostgreSQL database, Redis broker/result backend and media filesystem. Mount media at `/usr/src/app/media` everywhere. Docker volumes with the same name on different hosts do not share files. Keep database/queue/storage endpoints on a private network or authenticated tunnels.
+
+`DISTRIBUTED_GPU_ENABLED=1` enables explicit routing and PostgreSQL model-training locks. Inference uses `intensive-inference`; training for document IDs in `CUDA_TRAINING_DOCUMENT_IDS` uses `cuda-training`; other training retains `gpu`. The default allowlist is empty. Configure ARC workers to consume `gpu`, the inference worker to consume `intensive-inference`, and the experimental CUDA trainer to consume `cuda-training`. Unknown/collection training retains existing routes. This is an explicit allowlist, not an automatic VRAM scheduler.
+
+Use one prefork process per GPU, prefetch 1 and `--max-tasks-per-child=1`. Configure `worker_cancel_long_running_tasks_on_connection_loss=True` when enabling distributed workers. A PostgreSQL advisory lock excludes simultaneous writers to one model; loss of the lock connection prevents checkpoint conversion. This does not promise exactly-once processing or automatic resume after every failure. Validate interruption handling and checkpoints before production use.
+
+Videm training uses a fresh `runs/<uuid>` directory beneath the model directory for checkpoints, metric history and export proof. Its private training configuration and module are still required and are not included in this repository. Run one task per worker process.
+
+Initial hardware validation on dual RTX 3060 12GB cards passed recognition, segmentation and a one-epoch checkpoint/export/reload test on each card and concurrently. A distributed staging test returned results through the central database and shared media; full-float32 segmentation matched the ARC reference on the tested page. These bounded checks do not validate future images or establish model accuracy.

@@ -1,5 +1,7 @@
 from core.tasks import (os, User, settings, apps, slugify, send_event, _, np, logger, make_segmentation_training_data, _to_ptl_device, BLLASegmentationTrainingDataConfig, BLLASegmentationTrainingConfig, BLLASegmentationDataModule, BLLASegmentationModel, KrakenTrainer, ModelCheckpoint, FrontendFeedback, DidNotConverge, convert_models, shutil)
 def _videm_v4_segtrain(model_pk=None, part_pks=[], document_pk=None, task_group_pk=None, user_pk=None, **kwargs):
+    from pathlib import Path
+    import uuid
     # # Note hack to circumvent AssertionError: daemonic processes are not allowed to have children
     from multiprocessing import current_process
     current_process().daemon = False
@@ -32,7 +34,7 @@ def _videm_v4_segtrain(model_pk=None, part_pks=[], document_pk=None, task_group_
         load = '/usr/src/app/videm-seg-v4/start-v3-regions.safetensors'
         model.file = model.file.field.upload_to(model, slugify(model.name) + '.safetensors')
 
-    model_dir = os.path.join(settings.MEDIA_ROOT, os.path.split(model.file.path)[0])
+    model_dir = os.path.join(settings.MEDIA_ROOT, os.path.split(model.file.path)[0], 'runs', uuid.uuid4().hex)
 
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
@@ -74,7 +76,11 @@ def _videm_v4_segtrain(model_pk=None, part_pks=[], document_pk=None, task_group_
         np.random.default_rng(241960353267317949653744176059648850006).shuffle(ground_truth)
         partition = max(1, int(len(ground_truth) / 10))
 
+        import videm_seg_v4 as metrics_module
         from videm_seg_v4 import CONFIG, seed, configure, EntryMetrics
+        # Each worker process gets an independent metrics/checkpoint directory.
+        metrics_module.ROOT = Path(model_dir)
+        (Path(model_dir) / 'training-config.json').write_text(json.dumps(CONFIG, indent=2))
         assert document_pk == CONFIG['document']
         assert set(part_pks) == set(CONFIG['train'] + CONFIG['validation'])
         assert not set(part_pks) & set(CONFIG['test'])
@@ -136,6 +142,8 @@ def _videm_v4_segtrain(model_pk=None, part_pks=[], document_pk=None, task_group_
         try:
             best_score_val = float(best_score) if best_score is not None else 0.0
             logger.info(f'Converting best model {best_path} (accuracy: {best_score_val}) to {model.file.path}.')
+            from training_safety import assert_training_lock
+            assert_training_lock()
             convert_models([best_path], model.file.path)
             from kraken.models import load_models, write_safetensors
             from entry_extraction import CONFIG as extractor_config
@@ -153,11 +161,11 @@ def _videm_v4_segtrain(model_pk=None, part_pks=[], document_pk=None, task_group_
             assert weight_digest(load_models(model.file.path)[0]) == before
             import re
             from pathlib import Path
-            history = [json.loads(row) for row in Path('/usr/src/app/videm-seg-v4/history.jsonl').read_text().splitlines()]
+            history = [json.loads(row) for row in (Path(model_dir) / 'history.jsonl').read_text().splitlines()]
             selected_epoch = int(re.search(r'epoch[=_](\d+)', best_path).group(1)) + 1
             selected = next(row for row in history if row['epoch'] == selected_epoch)
             model.training_accuracy = selected['f1']
-            Path('/usr/src/app/videm-seg-v4/export-proof.json').write_text(json.dumps({'selected_epoch': selected_epoch, 'selected_checkpoint': best_path, 'validation_entry_f1': selected['f1'], 'composite_selection_score': best_score_val, 'weights_unchanged_by_metadata_restore': True, 'weight_digest': before}, indent=2))
+            (Path(model_dir) / 'export-proof.json').write_text(json.dumps({'selected_epoch': selected_epoch, 'selected_checkpoint': best_path, 'validation_entry_f1': selected['f1'], 'composite_selection_score': best_score_val, 'weights_unchanged_by_metadata_restore': True, 'weight_digest': before}, indent=2))
         except FileNotFoundError:
             logger.info(f'Model {os.path.split(model.file.path)[0]} did not improve.')
             if user:

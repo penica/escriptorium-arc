@@ -29,3 +29,17 @@ _annotations = dict(app.conf.task_annotations or {})
 _annotations['core.tasks.segtrain'] = {**_annotations.get('core.tasks.segtrain', {}), 'acks_late': True}
 app.conf.task_annotations = _annotations
 app.autodiscover_tasks()""")
+# Optional device routing is kept separate from upstream's accounting route map.
+p=root/'escriptorium/celery.py'
+p.write_text(p.read_text()+"\nfrom distributed_routing import install as _install_distributed_routing\n_install_distributed_routing(app)\n")
+# Lock each model across hosts while it is being trained. Opt-in at runtime.
+p=root/'apps/core/tasks.py'
+s=p.read_text()
+s='from training_safety import exclusive_training, assert_training_lock\n'+s
+for name in ('train', 'segtrain', 'train_from_collection', 'segtrain_from_collection'):
+    marker='def '+name+'('
+    assert s.count(marker)==1,(name,s.count(marker))
+    s=s.replace(marker,'@exclusive_training\n'+marker)
+import re
+s=re.sub(r'(?m)^( +)convert_models\(\[best_path\], model.file.path\)', r'\1assert_training_lock()\n\1convert_models([best_path], model.file.path)', s)
+p.write_text(s)
