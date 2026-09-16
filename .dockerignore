@@ -1,0 +1,10 @@
+*
+!Dockerfile
+!source/
+!source/**
+!extensions/
+!extensions/**
+!patches/
+!patches/**
+!licenses/
+!licenses/**

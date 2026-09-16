@@ -1,0 +1,106 @@
+--- a/segmentation.py
++++ b/segmentation.py
+@@ -420,33 +420,39 @@
+ 
+ 
+ def vectorize_regions(im: np.ndarray, threshold: float = 0.5):
+-    """
+-    Vectorizes lines from a binarized array.
+-
+-    Args:
+-        im (np.ndarray): Array of shape (H, W) with the first dimension
+-                         being a probability distribution over the region.
+-        threshold (float): Threshold for binarization
+-
+-    Returns:
+-        [[x0, y0, ... xn, yn], [xm, ym, ..., xk, yk], ... ]
+-        A list of lists containing the region polygons.
+-    """
+-    bin = im > threshold
+-    labelled = label(bin)
++    """Vectorize region components, repairing invalid outline geometry.
++
++    Components under four heatmap pixels cannot define useful entry regions.
++    Keep normal boundary tracing, with a contour fallback for degenerate blobs.
++    """
++    from shapely import make_valid
++    from skimage.measure import find_contours
++    def polygon_parts(value):
++        if value.is_empty:
++            return []
++        if value.geom_type == 'Polygon':
++            return [value]
++        if hasattr(value, 'geoms'):
++            return [p for child in value.geoms for p in polygon_parts(child)]
++        return []
+     boundaries = []
+-    for x in regionprops(labelled):
+-        boundary = boundary_tracing(x)
+-        if len(boundary) > 2:
+-            boundaries.append(geom.Polygon(boundary))
+-    # merge regions that overlap
+-    boundaries = unary_union(boundaries)
+-    # simplify them afterwards
+-    if boundaries.geom_type == 'Polygon':
+-        boundaries = [boundaries.boundary.simplify(10)]
+-    else:
+-        boundaries = [x.boundary.simplify(10) for x in boundaries.geoms]
+-    return [np.array(x.coords, dtype=np.uint)[:, [1, 0]].tolist() for x in boundaries]
++    for component in regionprops(label(im > threshold)):
++        if component.area < 4:
++            continue
++        try:
++            outlines = [boundary_tracing(component)]
++        except (IndexError, ValueError):
++            offset = np.array(component.bbox[:2]) - 1
++            outlines = [points + offset for points in find_contours(np.pad(component.image, 1), 0.5)]
++        for boundary in outlines:
++            if len(boundary) > 2:
++                polygon = geom.Polygon(boundary)
++                boundaries.extend(polygon_parts(polygon if polygon.is_valid else make_valid(polygon)))
++    if not boundaries:
++        return []
++    merged = unary_union(boundaries)
++    return [np.clip(np.array(poly.exterior.simplify(10).coords), 0, None).astype('int')[:, [1, 0]].tolist()
++            for poly in polygon_parts(merged) if poly.area > 0]
+ 
+ 
+ def _rotate(image: _T_pil_or_np,
+@@ -645,7 +651,10 @@
+     bottom_offset_polygon = np.concatenate((offset_baseline, env_bottom[::-1]))
+ 
+     angle = np.arctan2(dir_vec[1], dir_vec[0])
+-    roi_polygon = unary_union([geom.Polygon(upper_polygon), geom.Polygon(bottom_polygon)])
++    # Integer seam coordinates may self-intersect. Repair invalid input only.
++    from shapely import make_valid
++    roi_parts = [geom.Polygon(upper_polygon), geom.Polygon(bottom_polygon)]
++    roi_polygon = unary_union([part if part.is_valid else make_valid(part) for part in roi_parts])
+ 
+     if topline:
+         upper_seam = _calc_seam(baseline, upper_polygon, angle, im_feats)
+@@ -676,7 +685,24 @@
+         polygon = geom.Polygon(polygon)
+     if not polygon.is_valid:
+         raise Exception(f'Invalid bounding polygon computed: {explain_validity(polygon)}')
+-    polygon = np.array(roi_polygon.intersection(polygon).boundary.coords, dtype=int)
++    clipped = roi_polygon.intersection(polygon)
++    if clipped.geom_type == 'Polygon':
++        # This is exactly the former boundary for the ordinary no-hole case.
++        polygon = np.array(clipped.exterior.coords, dtype=int)
++    else:
++        # Repaired seams can contain subpixel disconnected polygon fragments.
++        # Preserve all polygonal pieces in one enclosing crop; never drop a line
++        # or arbitrarily select the largest piece. Only failed multipart cases
++        # reach this fallback; ordinary successful crops remain identical.
++        def polygonal_parts(part):
++            if part.geom_type == 'Polygon' and not part.is_empty:
++                return [part]
++            return [p for child in getattr(part, 'geoms', ()) for p in polygonal_parts(child)]
++        pieces = polygonal_parts(clipped)
++        if not pieces:
++            raise ValueError('Line crop intersection contains no polygonal area')
++        envelope = unary_union(pieces).convex_hull
++        polygon = np.array(envelope.exterior.coords, dtype=int)
+     return polygon
+ 
+ 

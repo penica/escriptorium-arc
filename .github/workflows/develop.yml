@@ -1,0 +1,93 @@
+name: Track develop and build candidate
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: develop-candidate
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    env:
+      ARC_RUNTIME_IMAGE: ${{ vars.ARC_RUNTIME_IMAGE }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Fetch immutable upstream source
+        id: upstream
+        run: python3 scripts/fetch-upstream.py
+      - name: Validate application patches
+        run: python3 scripts/check-source.py
+      - name: Explain runtime prerequisite
+        if: env.ARC_RUNTIME_IMAGE == ''
+        run: |
+          echo '### Source compatibility checked; image build not configured' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Publish an audited ARC runtime and set ARC_RUNTIME_IMAGE to its registry reference with @sha256 digest. No candidate image was built.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Validate runtime and calculate immutable tag
+        if: env.ARC_RUNTIME_IMAGE != ''
+        id: image
+        env:
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, re
+          runtime = os.environ['ARC_RUNTIME_IMAGE']
+          if not re.fullmatch(r'[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64}', runtime):
+              raise SystemExit('ARC_RUNTIME_IMAGE must be a registry image pinned by digest')
+          owner = os.environ['GITHUB_REPOSITORY_OWNER'].lower()
+          tag = f"ghcr.io/{owner}/escriptorium-arc:develop-{os.environ['UPSTREAM_COMMIT']}-recipe-{os.environ['GITHUB_SHA'][:12]}-runtime-{hashlib.sha256(runtime.encode()).hexdigest()[:12]}"
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'tag={tag}\n')
+          PY
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        if: env.ARC_RUNTIME_IMAGE != ''
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Skip an already published candidate
+        if: env.ARC_RUNTIME_IMAGE != ''
+        id: existing
+        env:
+          IMAGE: ${{ steps.image.outputs.tag }}
+        run: |
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+            echo "Candidate already exists: $IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        if: env.ARC_RUNTIME_IMAGE != '' && steps.existing.outputs.exists != 'true'
+      - name: Build candidate locally
+        if: env.ARC_RUNTIME_IMAGE != '' && steps.existing.outputs.exists != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ steps.image.outputs.tag }}
+          build-args: |
+            ARC_RUNTIME_IMAGE=${{ env.ARC_RUNTIME_IMAGE }}
+            UPSTREAM_COMMIT=${{ steps.upstream.outputs.commit }}
+      - name: Import smoke test then publish candidate
+        if: env.ARC_RUNTIME_IMAGE != '' && steps.existing.outputs.exists != 'true'
+        env:
+          IMAGE: ${{ steps.image.outputs.tag }}
+        run: |
+          docker run --rm --network none -e PYTHONPATH=/usr/src/app:/usr/src/app/apps -v "$PWD/scripts/smoke-image.py:/tmp/smoke.py:ro" --entrypoint python "$IMAGE" /tmp/smoke.py
+          docker push "$IMAGE"
+          echo "### Candidate published: $IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Requires isolated database migration, editor, recognition, segmentation and real ARC training tests before production promotion.' >> "$GITHUB_STEP_SUMMARY"
